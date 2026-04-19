@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Remoty</string>
-    <string name="nfc_relay_description">Remoty NFC Relay — forwards NFC commands to a remote device</string>
+    <string name="app_name">Telesor</string>
+    <string name="nfc_relay_description">Telesor NFC Relay — forwards NFC commands to a remote device</string>
     <string name="nfc_fido_aids">FIDO/WebAuthn passkey relay</string>
 </resources>

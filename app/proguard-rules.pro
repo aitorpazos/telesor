@@ -1,4 +1,4 @@
-# Remoty ProGuard rules
+# Telesor ProGuard rules
 
 # kotlinx.serialization
 -keepattributes *Annotation*, InnerClasses
@@ -7,11 +7,11 @@
 -keepclasseswithmembers class kotlinx.serialization.json.** {
     kotlinx.serialization.KSerializer serializer(...);
 }
--keep,includedescriptorclasses class dev.remoty.data.**$$serializer { *; }
--keepclassmembers class dev.remoty.data.** {
+-keep,includedescriptorclasses class dev.telesor.data.**$$serializer { *; }
+-keepclassmembers class dev.telesor.data.** {
     *** Companion;
 }
--keepclasseswithmembers class dev.remoty.data.** {
+-keepclasseswithmembers class dev.telesor.data.** {
     kotlinx.serialization.KSerializer serializer(...);
 }
 

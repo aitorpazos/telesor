@@ -6,11 +6,11 @@ plugins {
 }
 
 android {
-    namespace = "dev.remoty"
+    namespace = "dev.telesor"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "dev.remoty"
+        applicationId = "dev.telesor"
         minSdk = 35
         targetSdk = 35
         versionCode = 1

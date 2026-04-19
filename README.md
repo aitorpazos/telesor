@@ -1,4 +1,4 @@
-# Remoty
+# Telesor
 
 Share your phone's camera and NFC reader with another Android device over an encrypted WiFi connection.
 
@@ -8,14 +8,14 @@ You have an Android device with no camera and no NFC reader, but your phone has 
 
 ## The Solution
 
-Remoty creates a **virtual camera** and **NFC relay** on the target device, powered by your phone's real hardware. Apps on the target device see the virtual camera as a real camera — video calls, QR scanners, everything works transparently.
+Telesor creates a **virtual camera** and **NFC relay** on the target device, powered by your phone's real hardware. Apps on the target device see the virtual camera as a real camera — video calls, QR scanners, everything works transparently.
 
 ## Architecture
 
 ```
 Phone (Provider)                    Target Device (Consumer)
 ┌─────────────────────┐             ┌──────────────────────────┐
-│  Remoty App         │             │  Remoty App + Shizuku    │
+│  Telesor App        │             │  Telesor App + Shizuku   │
 │                     │             │                          │
 │  • CameraX capture  │◄──WiFi────►│  • VirtualDeviceManager  │
 │  • H.264 encoding   │  encrypted │  • VirtualCamera (API 35)│
@@ -60,10 +60,9 @@ adb shell sh /storage/emulated/0/Android/data/moe.shizuku.privileged.api/start.s
 
 Or install Shizuku from [Google Play](https://play.google.com/store/apps/details?id=moe.shizuku.privileged.api) and start it via wireless debugging.
 
-### 2. Build and install Remoty
+### 2. Build and install Telesor
 
 ```bash
-cd remoty
 ./gradlew assembleDebug
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
@@ -72,7 +71,7 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 
 ### 3. Pair devices
 
-1. Open Remoty on both devices
+1. Open Telesor on both devices
 2. Select **Provider** on the phone, **Consumer** on the target device
 3. Grant requested permissions
 4. Enter the 6-digit pairing code shown on the provider
@@ -83,7 +82,7 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 ### Pairing Flow
 ```
 Provider                              Consumer
-   │  BLE advertise (RMTY magic)  ←──── BLE scan
+   │  BLE advertise (TLSR magic)  ←──── BLE scan
    │  GATT server ready           ────→ GATT connect
    │                              ←──── Write: "CODE|PUBKEY|DEVICE_ID"
    │  Validate code
@@ -114,8 +113,8 @@ External NFC reader → touches consumer device
 ## Project Structure
 
 ```
-app/src/main/kotlin/dev/remoty/
-├── RemotyApp.kt                    # Application class
+app/src/main/kotlin/dev/telesor/
+├── TelesorApp.kt                    # Application class
 ├── ble/
 │   ├── BleConstants.kt             # UUIDs, magic bytes
 │   ├── BleDiscoveryManager.kt      # BLE advertising & scanning
@@ -133,10 +132,10 @@ app/src/main/kotlin/dev/remoty/
 ├── data/
 │   ├── Models.kt                   # DeviceRole, PairedDevice, etc.
 │   ├── Protocol.kt                 # Wire protocol (sealed interface)
-│   └── RemotyPreferences.kt        # DataStore persistence
+│   └── TelesorPreferences.kt       # DataStore persistence
 ├── net/
 │   ├── ConnectionManager.kt        # Connection lifecycle + auto-reconnect
-│   └── RemotyChannel.kt            # Encrypted TCP channel
+│   └── TelesorChannel.kt           # Encrypted TCP channel
 ├── nfc/
 │   ├── NfcReaderManager.kt         # Provider NFC reader
 │   ├── NfcSessionManager.kt        # NFC relay orchestrator

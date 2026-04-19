@@ -82,16 +82,16 @@ jobs:
       - name: Rename APKs
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/debug/*.apk dist/remoty-${{ steps.version.outputs.VERSION }}-debug.apk
+          cp app/build/outputs/apk/debug/*.apk dist/telesor-${{ steps.version.outputs.VERSION }}-debug.apk
           RELEASE_APK=$(find app/build/outputs/apk/release -name '*.apk' 2>/dev/null | head -1)
           if [ -n "$RELEASE_APK" ]; then
-            cp "$RELEASE_APK" dist/remoty-${{ steps.version.outputs.VERSION }}-release.apk
+            cp "$RELEASE_APK" dist/telesor-${{ steps.version.outputs.VERSION }}-release.apk
           fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Remoty ${{ steps.version.outputs.VERSION }}
+          name: Telesor ${{ steps.version.outputs.VERSION }}
           body: |
             ## What's Changed
 
@@ -100,8 +100,8 @@ jobs:
             ---
 
             **Installation:**
-            - Download `remoty-${{ steps.version.outputs.VERSION }}-release.apk` (signed release build)
-            - If unavailable, use `remoty-${{ steps.version.outputs.VERSION }}-debug.apk` (debug build)
+            - Download `telesor-${{ steps.version.outputs.VERSION }}-release.apk` (signed release build)
+            - If unavailable, use `telesor-${{ steps.version.outputs.VERSION }}-debug.apk` (debug build)
             - Enable "Install from unknown sources" and install
 
             **Requirements:**
