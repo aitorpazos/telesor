@@ -23,12 +23,14 @@ import androidx.compose.material.icons.outlined.CameraAlt
 import androidx.compose.material.icons.outlined.Cameraswitch
 import androidx.compose.material.icons.outlined.Nfc
 import androidx.compose.material.icons.outlined.SignalWifi4Bar
+import androidx.compose.material.icons.outlined.SignalWifiOff
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -49,11 +51,16 @@ import androidx.compose.ui.unit.dp
 import dev.remoty.camera.CameraPreviewView
 import dev.remoty.camera.CameraSessionManager
 import dev.remoty.camera.CameraSessionState
+import dev.remoty.data.ConnectionState
 import dev.remoty.data.DeviceRole
+import dev.remoty.nfc.NfcSessionManager
+import dev.remoty.nfc.NfcSessionState
 
 @Composable
 fun ConnectionScreen(
     roleName: String,
+    latencyMs: Long = -1L,
+    connectionState: ConnectionState = ConnectionState.CONNECTED,
     onDisconnect: () -> Unit,
     cameraSessionManager: CameraSessionManager? = null,
     onStartCamera: ((useFront: Boolean) -> Unit)? = null,
@@ -69,6 +76,10 @@ fun ConnectionScreen(
 
     val isStreaming = cameraState == CameraSessionState.STREAMING
     var useFrontCamera by remember { mutableStateOf(false) }
+
+    val isReconnecting = connectionState == ConnectionState.UPGRADING_TO_WIFI
+    val isDisconnected = connectionState == ConnectionState.DISCONNECTED
+    val isError = connectionState == ConnectionState.ERROR
 
     Column(
         modifier = Modifier
@@ -87,17 +98,48 @@ fun ConnectionScreen(
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold,
                 )
-                Text(
-                    text = "Connected via WiFi",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.tertiary,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val statusText = when {
+                        isReconnecting -> "Reconnecting…"
+                        isDisconnected -> "Disconnected"
+                        isError -> "Connection error"
+                        latencyMs >= 0 -> "Connected · ${latencyMs}ms"
+                        else -> "Connected via WiFi"
+                    }
+                    val statusColor = when {
+                        isReconnecting -> MaterialTheme.colorScheme.tertiary
+                        isDisconnected || isError -> MaterialTheme.colorScheme.error
+                        else -> MaterialTheme.colorScheme.tertiary
+                    }
+
+                    if (isReconnecting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp,
+                            color = statusColor,
+                        )
+                        Spacer(Modifier.width(6.dp))
+                    }
+
+                    Text(
+                        text = statusText,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = statusColor,
+                    )
+                }
             }
             Icon(
-                imageVector = Icons.Outlined.SignalWifi4Bar,
-                contentDescription = "Connected",
+                imageVector = when {
+                    isReconnecting || isDisconnected || isError -> Icons.Outlined.SignalWifiOff
+                    else -> Icons.Outlined.SignalWifi4Bar
+                },
+                contentDescription = "Connection status",
                 modifier = Modifier.size(32.dp),
-                tint = MaterialTheme.colorScheme.tertiary,
+                tint = when {
+                    isReconnecting -> MaterialTheme.colorScheme.tertiary
+                    isDisconnected || isError -> MaterialTheme.colorScheme.error
+                    else -> MaterialTheme.colorScheme.tertiary
+                },
             )
         }
 
@@ -170,6 +212,7 @@ fun ConnectionScreen(
             cameraState = cameraState,
             role = role,
             useFrontCamera = useFrontCamera,
+            isConnected = !isReconnecting && !isDisconnected && !isError,
             onToggleCamera = {
                 if (isStreaming) {
                     onStopCamera?.invoke()
@@ -179,7 +222,6 @@ fun ConnectionScreen(
             },
             onSwitchFacing = {
                 useFrontCamera = !useFrontCamera
-                // If streaming, restart with new facing
                 if (isStreaming) {
                     onStopCamera?.invoke()
                     onStartCamera?.invoke(useFrontCamera)
@@ -220,6 +262,7 @@ private fun CameraControlCard(
     cameraState: CameraSessionState,
     role: DeviceRole,
     useFrontCamera: Boolean,
+    isConnected: Boolean,
     onToggleCamera: () -> Unit,
     onSwitchFacing: () -> Unit,
 ) {
@@ -277,11 +320,11 @@ private fun CameraControlCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                // Start/Stop button
                 FilledTonalButton(
                     onClick = onToggleCamera,
                     modifier = Modifier.weight(1f),
-                    enabled = cameraState != CameraSessionState.STARTING &&
+                    enabled = isConnected &&
+                            cameraState != CameraSessionState.STARTING &&
                             cameraState != CameraSessionState.STOPPING,
                 ) {
                     Icon(
@@ -293,7 +336,6 @@ private fun CameraControlCard(
                     Text(if (isStreaming) "Stop" else "Start Camera")
                 }
 
-                // Switch facing button (provider only)
                 if (role == DeviceRole.PROVIDER) {
                     IconButton(onClick = onSwitchFacing) {
                         Icon(

@@ -1,14 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:description="@string/app_name"
-    android:requireDeviceUnlock="false">
-    <!-- We dynamically register AIDs at runtime, this is the fallback -->
+    android:description="@string/nfc_relay_description"
+    android:requireDeviceUnlock="false"
+    android:requireDeviceScreenOn="true">
+
+    <!--
+        FIDO / WebAuthn AIDs.
+        These are the standard AIDs for FIDO U2F and FIDO2/CTAP2 protocols,
+        enabling passkey relay through the NFC channel.
+    -->
     <aid-group
         android:category="other"
-        android:description="@string/app_name">
-        <!-- FIDO/U2F AID -->
+        android:description="@string/nfc_fido_aids">
+        <!-- FIDO/U2F applet AID (NIST) -->
         <aid-filter android:name="A0000006472F0001" />
-        <!-- FIDO2/CTAP AID -->
+        <!-- FIDO2/CTAP2 applet AID -->
         <aid-filter android:name="A0000006472F0002" />
     </aid-group>
+
+    <!--
+        Generic / catch-all group for other ISO-DEP protocols.
+        Additional AIDs can be registered here for specific use cases
+        (e.g., transit cards, access control, payment test environments).
+    -->
+
 </host-apdu-service>

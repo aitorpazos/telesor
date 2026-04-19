@@ -16,9 +16,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CameraAlt
 import androidx.compose.material.icons.outlined.Devices
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -37,7 +39,10 @@ import dev.remoty.data.DeviceRole
 import kotlinx.coroutines.delay
 
 @Composable
-fun RoleSelectionScreen(onRoleSelected: (DeviceRole) -> Unit) {
+fun RoleSelectionScreen(
+    onRoleSelected: (DeviceRole) -> Unit,
+    onSettings: () -> Unit = {},
+) {
     var visible by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { delay(100); visible = true }
 
@@ -46,8 +51,23 @@ fun RoleSelectionScreen(onRoleSelected: (DeviceRole) -> Unit) {
             .fillMaxSize()
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
     ) {
+        // Settings button at top-right
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            IconButton(onClick = onSettings) {
+                Icon(
+                    Icons.Outlined.Settings,
+                    contentDescription = "Settings",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        Spacer(Modifier.weight(1f))
+
         AnimatedVisibility(visible, enter = fadeIn() + slideInVertically { -40 }) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
@@ -84,6 +104,8 @@ fun RoleSelectionScreen(onRoleSelected: (DeviceRole) -> Unit) {
                 )
             }
         }
+
+        Spacer(Modifier.weight(1f))
     }
 }
 

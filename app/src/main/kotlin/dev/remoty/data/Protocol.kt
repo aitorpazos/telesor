@@ -54,16 +54,34 @@ sealed interface RemotyPacket {
     @Serializable
     data object RequestKeyFrame : RemotyPacket
 
+    /** Consumer requests provider to start NFC reader mode. */
+    @Serializable
+    data object NfcStartRelay : RemotyPacket
+
+    /** Provider acknowledges NFC reader mode is active. */
+    @Serializable
+    data object NfcRelayStarted : RemotyPacket
+
+    /** Stop NFC relay. */
+    @Serializable
+    data object NfcStopRelay : RemotyPacket
+
+    /** Provider confirms NFC relay stopped. */
+    @Serializable
+    data object NfcRelayStopped : RemotyPacket
+
     /** NFC: consumer forwards an APDU command to provider's NFC reader. */
     @Serializable
     data class NfcApduCommand(
         val apdu: String, // hex-encoded
+        val requestId: Long = 0, // correlation ID for matching responses
     ) : RemotyPacket
 
     /** NFC: provider returns APDU response. */
     @Serializable
     data class NfcApduResponse(
         val response: String, // hex-encoded
+        val requestId: Long = 0,
     ) : RemotyPacket
 
     /** NFC: provider detected a tag. */
@@ -71,6 +89,7 @@ sealed interface RemotyPacket {
     data class NfcTagDetected(
         val uid: String, // hex-encoded
         val techList: List<String>,
+        val atsHex: String? = null, // Answer To Select for ISO-DEP
     ) : RemotyPacket
 
     /** NFC: tag removed. */
