@@ -75,7 +75,7 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
 
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     debugImplementation(libs.androidx.ui.tooling)
