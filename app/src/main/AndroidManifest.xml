@@ -37,17 +37,17 @@
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
 
     <application
-        android:name=".RemotyApp"
+        android:name=".TelesorApp"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Remoty">
+        android:theme="@style/Theme.Telesor">
 
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
-            android:theme="@style/Theme.Remoty">
+            android:theme="@style/Theme.Telesor">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
