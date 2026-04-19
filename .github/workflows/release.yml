@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest --no-daemon
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Build release APK
+        if: env.HAS_KEYSTORE == 'true'
+        env:
+          HAS_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 != '' }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > app/release.keystore
+          cat >> gradle.properties <<EOF
+          android.injected.signing.store.file=$(pwd)/app/release.keystore
+          android.injected.signing.store.password=$KEYSTORE_PASSWORD
+          android.injected.signing.key.alias=$KEY_ALIAS
+          android.injected.signing.key.password=$KEY_PASSWORD
+          EOF
+          ./gradlew assembleRelease --no-daemon
+          rm -f app/release.keystore
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git tag --sort=-version:refname | sed -n '2p')
+          if [ -z "$PREV_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:'- %s (%h)' HEAD)
+          else
+            CHANGELOG=$(git log --pretty=format:'- %s (%h)' ${PREV_TAG}..HEAD)
+          fi
+          {
+            echo 'CHANGELOG<<EOF'
+            echo "$CHANGELOG"
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+
+      - name: Rename APKs
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/*.apk dist/remoty-${{ steps.version.outputs.VERSION }}-debug.apk
+          if [ -f app/build/outputs/apk/release/*.apk ]; then
+            cp app/build/outputs/apk/release/*.apk dist/remoty-${{ steps.version.outputs.VERSION }}-release.apk
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Remoty ${{ steps.version.outputs.VERSION }}
+          body: |
+            ## What's Changed
+
+            ${{ steps.changelog.outputs.CHANGELOG }}
+
+            ---
+
+            **Installation:**
+            - Download `remoty-${{ steps.version.outputs.VERSION }}-debug.apk` (unsigned, for testing)
+            - Download `remoty-${{ steps.version.outputs.VERSION }}-release.apk` (signed, if available)
+            - Enable "Install from unknown sources" and install
+
+            **Requirements:**
+            - Consumer device: Android 15+ (API 35)
+            - Provider device: Android 9+ (API 28)
+            - Shizuku installed on consumer device
+          files: dist/*.apk
+          draft: false
+          prerelease: false
+          generate_release_notes: true

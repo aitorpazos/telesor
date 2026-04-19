@@ -1,11 +1,5 @@
 package dev.remoty.camera
 
-import android.annotation.SuppressLint
-import android.companion.virtual.VirtualDeviceManager
-import android.companion.virtual.VirtualDeviceParams
-import android.companion.virtual.camera.VirtualCamera
-import android.companion.virtual.camera.VirtualCameraCallback
-import android.companion.virtual.camera.VirtualCameraConfig
 import android.content.Context
 import android.graphics.ImageFormat
 import android.hardware.camera2.CameraCharacteristics
@@ -24,20 +18,20 @@ private const val TAG = "VirtualCameraManager"
  * This requires Android 15 (API 35) and Shizuku for the CREATE_VIRTUAL_DEVICE
  * permission (which is @SystemApi / signature|privileged).
  *
+ * All VirtualDeviceManager / VirtualCamera APIs are @SystemApi, so we access
+ * them via reflection to avoid compile-time dependency on hidden APIs.
+ *
  * When active, the virtual camera appears in CameraManager.getCameraIdList()
  * for ALL apps on the device — video calls, QR scanners, etc. all see it.
  *
  * Architecture:
  *   Remote camera frames → H264Decoder → Surface ← VirtualCamera reads from
- *
- * The VirtualCamera provides a Surface via onStreamConfigured callback.
- * We connect the H264Decoder's output to that Surface.
  */
 @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM) // API 35
 class VirtualCameraManager(private val context: Context) {
 
-    private var virtualDevice: android.companion.virtual.VirtualDevice? = null
-    private var virtualCamera: VirtualCamera? = null
+    private var virtualDevice: Any? = null   // VirtualDevice (accessed via reflection)
+    private var virtualCamera: Any? = null   // VirtualCamera
     private val callbackExecutor = Executors.newSingleThreadExecutor()
 
     /** Surface provided by VirtualCamera for us to write decoded frames to. */
@@ -52,6 +46,7 @@ class VirtualCameraManager(private val context: Context) {
      * Create a VirtualDevice and register a VirtualCamera.
      *
      * This call goes through Shizuku to access the @SystemApi.
+     * All classes are accessed via reflection since they are not in the public SDK.
      *
      * @param width   Camera resolution width
      * @param height  Camera resolution height
@@ -59,7 +54,6 @@ class VirtualCameraManager(private val context: Context) {
      * @param facing  LENS_FACING_FRONT or LENS_FACING_BACK
      * @return true if creation succeeded
      */
-    @SuppressLint("WrongConstant")
     fun create(
         width: Int = 1280,
         height: Int = 720,
@@ -72,38 +66,87 @@ class VirtualCameraManager(private val context: Context) {
         }
 
         try {
-            val vdm = context.getSystemService(Context.VIRTUAL_DEVICE_MANAGER_SERVICE)
-                as? VirtualDeviceManager
+            // Get VirtualDeviceManager via Context.getSystemService("virtual_device")
+            val vdm = context.getSystemService("virtual_device")
                 ?: run {
                     Log.e(TAG, "VirtualDeviceManager not available")
                     return false
                 }
 
-            // Create virtual device params
-            val deviceParams = VirtualDeviceParams.Builder()
-                .setName("Remoty Camera Device")
-                .setDevicePolicy(
-                    VirtualDeviceParams.POLICY_TYPE_CAMERA,
-                    VirtualDeviceParams.DEVICE_POLICY_CUSTOM
-                )
-                .build()
+            // Build VirtualDeviceParams via reflection
+            val paramsBuilderClass = Class.forName("android.companion.virtual.VirtualDeviceParams\$Builder")
+            val paramsBuilder = paramsBuilderClass.getDeclaredConstructor().newInstance()
 
-            // Create the virtual device
-            // Note: This requires CREATE_VIRTUAL_DEVICE permission via Shizuku
-            val vd = vdm.createVirtualDevice(
-                /* associationId = */ 0, // Requires CompanionDeviceManager association
-                deviceParams
-            )
+            // setName
+            paramsBuilderClass.getMethod("setName", String::class.java)
+                .invoke(paramsBuilder, "Remoty Camera Device")
+
+            // setDevicePolicy(POLICY_TYPE_CAMERA = 0, DEVICE_POLICY_CUSTOM = 1)
+            paramsBuilderClass.getMethod("setDevicePolicy", Int::class.java, Int::class.java)
+                .invoke(paramsBuilder, 0 /* POLICY_TYPE_CAMERA */, 1 /* DEVICE_POLICY_CUSTOM */)
+
+            val deviceParams = paramsBuilderClass.getMethod("build").invoke(paramsBuilder)
+
+            // createVirtualDevice(associationId, params)
+            val vdmClass = vdm.javaClass
+            val paramsClass = Class.forName("android.companion.virtual.VirtualDeviceParams")
+            val vd = vdmClass.getMethod("createVirtualDevice", Int::class.java, paramsClass)
+                .invoke(vdm, 0, deviceParams)
             virtualDevice = vd
 
-            // Configure virtual camera
-            val cameraConfig = VirtualCameraConfig.Builder("Remoty Remote Camera")
-                .addStreamConfig(width, height, ImageFormat.YUV_420_888, fps)
-                .setLensFacing(facing)
-                .setVirtualCameraCallback(callbackExecutor, virtualCameraCallback)
-                .build()
+            // Build VirtualCameraConfig via reflection
+            val configBuilderClass = Class.forName("android.companion.virtual.camera.VirtualCameraConfig\$Builder")
+            val configBuilder = configBuilderClass.getDeclaredConstructor(String::class.java)
+                .newInstance("Remoty Remote Camera")
 
-            val vc = vd.createVirtualCamera(cameraConfig)
+            // addStreamConfig(width, height, format, fps)
+            configBuilderClass.getMethod("addStreamConfig", Int::class.java, Int::class.java, Int::class.java, Int::class.java)
+                .invoke(configBuilder, width, height, ImageFormat.YUV_420_888, fps)
+
+            // setLensFacing
+            configBuilderClass.getMethod("setLensFacing", Int::class.java)
+                .invoke(configBuilder, facing)
+
+            // Create a callback proxy via java.lang.reflect.Proxy
+            val callbackClass = Class.forName("android.companion.virtual.camera.VirtualCameraCallback")
+            val callbackProxy = java.lang.reflect.Proxy.newProxyInstance(
+                callbackClass.classLoader,
+                arrayOf(callbackClass)
+            ) { _, method, args ->
+                when (method.name) {
+                    "onStreamConfigured" -> {
+                        val streamId = args!![0] as Int
+                        val surface = args[1] as Surface
+                        val w = args[2] as Int
+                        val h = args[3] as Int
+                        val format = args[4] as Int
+                        Log.i(TAG, "Stream configured: id=$streamId, ${w}x${h}, format=$format")
+                        cameraSurface = surface
+                        onSurfaceReady?.invoke(surface)
+                    }
+                    "onStreamClosed" -> {
+                        val streamId = args!![0] as Int
+                        Log.i(TAG, "Stream closed: id=$streamId")
+                        cameraSurface = null
+                    }
+                    "onProcessCaptureRequest" -> {
+                        // The system is requesting a frame. Our decoder continuously writes
+                        // to the surface, so this is handled automatically.
+                    }
+                }
+                null
+            }
+
+            // setVirtualCameraCallback(executor, callback)
+            configBuilderClass.getMethod("setVirtualCameraCallback", java.util.concurrent.Executor::class.java, callbackClass)
+                .invoke(configBuilder, callbackExecutor, callbackProxy)
+
+            val cameraConfig = configBuilderClass.getMethod("build").invoke(configBuilder)
+
+            // createVirtualCamera(config)
+            val configClass = Class.forName("android.companion.virtual.camera.VirtualCameraConfig")
+            val vc = vd!!.javaClass.getMethod("createVirtualCamera", configClass)
+                .invoke(vd, cameraConfig)
             virtualCamera = vc
 
             Log.i(TAG, "Virtual camera created: ${width}x${height} @ ${fps}fps")
@@ -115,43 +158,22 @@ class VirtualCameraManager(private val context: Context) {
         }
     }
 
-    private val virtualCameraCallback = object : VirtualCameraCallback {
-        override fun onStreamConfigured(
-            streamId: Int,
-            surface: Surface,
-            width: Int,
-            height: Int,
-            format: Int,
-        ) {
-            Log.i(TAG, "Stream configured: id=$streamId, ${width}x${height}, format=$format")
-            cameraSurface = surface
-            onSurfaceReady?.invoke(surface)
-        }
-
-        override fun onStreamClosed(streamId: Int) {
-            Log.i(TAG, "Stream closed: id=$streamId")
-            cameraSurface = null
-        }
-
-        override fun onProcessCaptureRequest(streamId: Int, frameId: Long) {
-            // The system is requesting a frame. Our decoder continuously writes
-            // to the surface, so this is handled automatically.
-            // For more precise control, we could signal the decoder here.
-        }
-    }
-
     /**
      * Destroy the virtual camera and virtual device.
      */
     fun destroy() {
         try {
-            virtualCamera?.close()
+            virtualCamera?.let {
+                it.javaClass.getMethod("close").invoke(it)
+            }
         } catch (_: Exception) {}
         virtualCamera = null
         cameraSurface = null
 
         try {
-            virtualDevice?.close()
+            virtualDevice?.let {
+                it.javaClass.getMethod("close").invoke(it)
+            }
         } catch (_: Exception) {}
         virtualDevice = null
 
