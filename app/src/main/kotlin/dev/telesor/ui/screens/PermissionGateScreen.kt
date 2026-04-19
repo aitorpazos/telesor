@@ -37,7 +37,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -199,7 +198,7 @@ private fun PermissionRow(
             else Icons.Outlined.RadioButtonUnchecked,
             contentDescription = if (granted) "Granted" else "Not granted",
             modifier = Modifier.size(24.dp),
-            tint = if (granted) Color(0xFF4CAF50) else MaterialTheme.colorScheme.outline,
+            tint = if (granted) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.outline,
         )
     }
 }
