@@ -38,21 +38,18 @@ jobs:
         run: ./gradlew assembleDebug --no-daemon
 
       - name: Build release APK
-        if: env.HAS_KEYSTORE == 'true'
+        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
         env:
-          HAS_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 != '' }}
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           echo "$KEYSTORE_BASE64" | base64 -d > app/release.keystore
-          cat >> gradle.properties <<EOF
-          android.injected.signing.store.file=$(pwd)/app/release.keystore
-          android.injected.signing.store.password=$KEYSTORE_PASSWORD
-          android.injected.signing.key.alias=$KEY_ALIAS
-          android.injected.signing.key.password=$KEY_PASSWORD
-          EOF
+          echo "android.injected.signing.store.file=$(pwd)/app/release.keystore" >> gradle.properties
+          echo "android.injected.signing.store.password=$KEYSTORE_PASSWORD" >> gradle.properties
+          echo "android.injected.signing.key.alias=$KEY_ALIAS" >> gradle.properties
+          echo "android.injected.signing.key.password=$KEY_PASSWORD" >> gradle.properties
           ./gradlew assembleRelease --no-daemon
           rm -f app/release.keystore
 
@@ -75,8 +72,9 @@ jobs:
         run: |
           mkdir -p dist
           cp app/build/outputs/apk/debug/*.apk dist/remoty-${{ steps.version.outputs.VERSION }}-debug.apk
-          if [ -f app/build/outputs/apk/release/*.apk ]; then
-            cp app/build/outputs/apk/release/*.apk dist/remoty-${{ steps.version.outputs.VERSION }}-release.apk
+          RELEASE_APK=$(find app/build/outputs/apk/release -name '*.apk' 2>/dev/null | head -1)
+          if [ -n "$RELEASE_APK" ]; then
+            cp "$RELEASE_APK" dist/remoty-${{ steps.version.outputs.VERSION }}-release.apk
           fi
 
       - name: Create GitHub Release
