@@ -186,6 +186,12 @@ app/src/main/kotlin/dev/telesor/
 - **NFC relay latency** — APDU round-trip over WiFi adds ~10-50ms. Most protocols tolerate this, but time-critical ones may not.
 - **Single camera stream** — Currently supports one camera direction at a time (front or back).
 
+## ⚠️ Disclaimer
+
+This is a **personal project** built to solve a specific problem I had. It is not professionally maintained — don't expect regular updates, timely issue responses, or guaranteed support. Use at your own risk.
+
+Contributions are welcome, but please understand that review and merge timelines are best-effort.
+
 ## License
 
-MIT
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
