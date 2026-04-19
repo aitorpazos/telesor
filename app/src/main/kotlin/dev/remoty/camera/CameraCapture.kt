@@ -9,6 +9,9 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.lifecycle.LifecycleOwner
 import kotlinx.coroutines.Dispatchers
@@ -82,9 +85,16 @@ class CameraCapture(private val context: Context) {
 
         val targetSize = Size(width, height)
 
+        val resolutionSelector = ResolutionSelector.Builder()
+            .setResolutionStrategy(
+                ResolutionStrategy(targetSize, ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER)
+            )
+            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+            .build()
+
         // ImageAnalysis delivers YUV_420_888 frames
         val imageAnalysis = ImageAnalysis.Builder()
-            .setTargetResolution(targetSize)
+            .setResolutionSelector(resolutionSelector)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
             .build()
@@ -97,7 +107,7 @@ class CameraCapture(private val context: Context) {
         // Optional local preview
         val preview = previewSurface?.let {
             Preview.Builder()
-                .setTargetResolution(targetSize)
+                .setResolutionSelector(resolutionSelector)
                 .build()
                 .also { p -> p.surfaceProvider = it }
         }
