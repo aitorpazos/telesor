@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/app_name"
+    android:requireDeviceUnlock="false">
+    <!-- We dynamically register AIDs at runtime, this is the fallback -->
+    <aid-group
+        android:category="other"
+        android:description="@string/app_name">
+        <!-- FIDO/U2F AID -->
+        <aid-filter android:name="A0000006472F0001" />
+        <!-- FIDO2/CTAP AID -->
+        <aid-filter android:name="A0000006472F0002" />
+    </aid-group>
+</host-apdu-service>
