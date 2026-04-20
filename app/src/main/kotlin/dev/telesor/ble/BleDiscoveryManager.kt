@@ -63,14 +63,23 @@ class BleDiscoveryManager(private val context: Context) {
             .setConnectable(true)
             .build()
 
-        // Manufacturer data: MAGIC (4) + role (1) + deviceId first 8 chars
+        // Manufacturer data: role (1) + deviceId first 4 chars
+        // Kept small to fit BLE 4.x 31-byte advertising limit.
+        // The service UUID already identifies this as a Telesor device,
+        // so we don't need the MAGIC bytes in the advertisement.
         val roleFlag = if (role == DeviceRole.PROVIDER) 0x01.toByte() else 0x02.toByte()
-        val idBytes = deviceId.take(8).toByteArray(Charsets.UTF_8)
-        val mfgData = BleConstants.ADVERTISEMENT_MAGIC + byteArrayOf(roleFlag) + idBytes
+        val idBytes = deviceId.take(4).toByteArray(Charsets.UTF_8)
+        val mfgData = byteArrayOf(roleFlag) + idBytes
 
+        // Primary advertising data: service UUID only (3 + 16 = 19 bytes with flags)
         val data = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .addServiceUuid(ParcelUuid(BleConstants.SERVICE_UUID))
+            .build()
+
+        // Scan response: manufacturer data (2 header + 2 company + 1 role + 4 id = 9 bytes)
+        val scanResponse = AdvertiseData.Builder()
+            .setIncludeDeviceName(false)
             .addManufacturerData(BleConstants.MANUFACTURER_ID, mfgData)
             .build()
 
@@ -80,11 +89,11 @@ class BleDiscoveryManager(private val context: Context) {
             }
 
             override fun onStartFailure(errorCode: Int) {
-                Log.e(TAG, "Advertising failed: $errorCode")
+                Log.e(TAG, "Advertising failed: errorCode=$errorCode")
             }
         }
         advertiseCallback = callback
-        adv.startAdvertising(settings, data, callback)
+        adv.startAdvertising(settings, data, scanResponse, callback)
     }
 
     @SuppressLint("MissingPermission")
@@ -133,25 +142,33 @@ class BleDiscoveryManager(private val context: Context) {
     }
 
     private fun parseScanResult(result: ScanResult): DiscoveredDevice? {
+        // Manufacturer data may be in the scan response.
+        // Format: role (1 byte) + deviceId (up to 4 bytes UTF-8)
         val mfgData = result.scanRecord
             ?.getManufacturerSpecificData(BleConstants.MANUFACTURER_ID)
-            ?: return null
 
-        // Validate magic
-        if (mfgData.size < 5) return null
-        val magic = mfgData.copyOfRange(0, 4)
-        if (!magic.contentEquals(BleConstants.ADVERTISEMENT_MAGIC)) return null
+        // Even without manufacturer data, if the service UUID matches we can
+        // still return a device (the scan response might not have arrived yet).
+        val hasServiceUuid = result.scanRecord?.serviceUuids
+            ?.any { it.uuid == BleConstants.SERVICE_UUID } == true
 
-        val roleByte = mfgData[4]
-        val role = when (roleByte) {
-            0x01.toByte() -> DeviceRole.PROVIDER
-            0x02.toByte() -> DeviceRole.CONSUMER
-            else -> return null
+        if (!hasServiceUuid) return null
+
+        var role = DeviceRole.PROVIDER // default assumption
+        var deviceId = result.device.address.takeLast(5) // fallback ID
+
+        if (mfgData != null && mfgData.isNotEmpty()) {
+            val roleByte = mfgData[0]
+            role = when (roleByte) {
+                0x01.toByte() -> DeviceRole.PROVIDER
+                0x02.toByte() -> DeviceRole.CONSUMER
+                else -> DeviceRole.PROVIDER
+            }
+
+            if (mfgData.size > 1) {
+                deviceId = String(mfgData.copyOfRange(1, mfgData.size), Charsets.UTF_8)
+            }
         }
-
-        val deviceId = if (mfgData.size > 5) {
-            String(mfgData.copyOfRange(5, mfgData.size), Charsets.UTF_8)
-        } else ""
 
         return DiscoveredDevice(
             address = result.device.address,

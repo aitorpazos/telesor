@@ -4,7 +4,8 @@
     <!-- BLE discovery & pairing -->
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
 
     <!-- WiFi transport -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
