@@ -115,6 +115,7 @@ fun TelesorNavigation(connectionManager: ConnectionManager) {
                 val roleName = backStackEntry.arguments?.getString("role") ?: "PROVIDER"
                 PairingScreen(
                     roleName = roleName,
+                    connectionManager = connectionManager,
                     onPaired = {
                         navController.navigate(Routes.connection(roleName)) {
                             popUpTo(Routes.ROLE_SELECTION)
