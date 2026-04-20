@@ -1,11 +1,13 @@
 package dev.telesor.ui.screens
 
-import android.annotation.SuppressLint
-import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -22,9 +24,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.Bluetooth
-import androidx.compose.material.icons.outlined.BluetoothSearching
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Devices
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -35,7 +37,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -44,17 +45,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import dev.telesor.TelesorApp
 import dev.telesor.ble.BleDiscoveryManager
 import dev.telesor.ble.BlePairingClient
 import dev.telesor.ble.BlePairingServer
@@ -64,8 +66,10 @@ import dev.telesor.crypto.SessionCrypto
 import dev.telesor.data.DeviceRole
 import dev.telesor.net.ConnectionManager
 import dev.telesor.net.NetworkUtils
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
-private const val TAG = "PairingScreen"
+private const val PROVIDER_TCP_PORT = 19850
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -76,13 +80,119 @@ fun PairingScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val role = try { DeviceRole.valueOf(roleName) } catch (_: Exception) { DeviceRole.PROVIDER }
 
+    // Shared crypto for this pairing session
+    val sessionCrypto = remember { SessionCrypto() }
+
+    // BLE discovery manager
+    val discoveryManager = remember { BleDiscoveryManager(context) }
+
+    // Pairing code — provider generates it, consumer enters it
+    val pairingCode = remember { SessionCrypto.generatePairingCode() }
+
+    // State
+    var pairingStatus by remember { mutableStateOf<PairingStatus>(PairingStatus.Idle) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    // Provider-specific state
+    var pairingServer by remember { mutableStateOf<BlePairingServer?>(null) }
+
+    // Consumer-specific state
+    val discoveredDevices = remember { mutableStateListOf<DiscoveredDevice>() }
+    var selectedDevice by remember { mutableStateOf<DiscoveredDevice?>(null) }
+    var enteredCode by remember { mutableStateOf("") }
+    var pairingClient by remember { mutableStateOf<BlePairingClient?>(null) }
+
+    // Device ID for this device
+    var deviceId by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        deviceId = dev.telesor.TelesorApp.instance.preferences.getDeviceId()
+    }
+
+    // Cleanup on dispose
+    DisposableEffect(Unit) {
+        onDispose {
+            discoveryManager.stopAdvertising()
+            pairingServer?.stop()
+            pairingClient?.stop()
+        }
+    }
+
+    // --- Provider: start advertising + GATT server ---
+    if (role == DeviceRole.PROVIDER && deviceId.isNotEmpty()) {
+        LaunchedEffect(deviceId) {
+            val wifiIp = NetworkUtils.getLocalWifiIpAddress(context)
+            if (wifiIp == null) {
+                errorMessage = "No WiFi connection detected"
+                pairingStatus = PairingStatus.Error
+                return@LaunchedEffect
+            }
+
+            // Start BLE advertising
+            discoveryManager.startAdvertising(DeviceRole.PROVIDER, deviceId)
+
+            // Start GATT server
+            val server = BlePairingServer(
+                context = context,
+                sessionCrypto = sessionCrypto,
+                expectedPairingCode = pairingCode,
+                deviceId = deviceId,
+                wifiHost = wifiIp,
+                wifiPort = PROVIDER_TCP_PORT,
+                onPairingComplete = { result ->
+                    scope.launch(Dispatchers.Main) {
+                        pairingStatus = PairingStatus.Success
+                        discoveryManager.stopAdvertising()
+                        pairingServer?.stop()
+                        // Start TCP server as provider
+                        connectionManager.startAsProvider(
+                            crypto = sessionCrypto,
+                            port = PROVIDER_TCP_PORT,
+                        )
+                        onPaired()
+                    }
+                },
+                onPairingFailed = { reason ->
+                    scope.launch(Dispatchers.Main) {
+                        errorMessage = reason
+                        pairingStatus = PairingStatus.Error
+                    }
+                },
+            )
+            server.start()
+            pairingServer = server
+            pairingStatus = PairingStatus.WaitingForPeer
+        }
+    }
+
+    // --- Consumer: start BLE scan ---
+    if (role == DeviceRole.CONSUMER && deviceId.isNotEmpty()) {
+        LaunchedEffect(deviceId) {
+            pairingStatus = PairingStatus.Scanning
+            discoveryManager.scan().collect { device ->
+                // Only show providers, deduplicate by address
+                if (device.role == DeviceRole.PROVIDER &&
+                    discoveredDevices.none { it.address == device.address }
+                ) {
+                    discoveredDevices.add(device)
+                }
+            }
+        }
+    }
+
+    // --- UI ---
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
             title = { Text("Pair Devices") },
             navigationIcon = {
-                IconButton(onClick = onBack) {
+                IconButton(onClick = {
+                    discoveryManager.stopAdvertising()
+                    pairingServer?.stop()
+                    pairingClient?.stop()
+                    onBack()
+                }) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
                 }
             },
@@ -90,131 +200,144 @@ fun PairingScreen(
 
         Column(
             modifier = Modifier
-                .weight(1f)
-                .padding(horizontal = 24.dp),
+                .fillMaxSize()
+                .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // Error banner
+            errorMessage?.let { msg ->
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                    ),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Outlined.ErrorOutline,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            text = msg,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
+            }
+
             when (role) {
                 DeviceRole.PROVIDER -> ProviderPairingContent(
-                    context = context,
-                    connectionManager = connectionManager,
-                    onPaired = onPaired,
+                    pairingCode = pairingCode,
+                    pairingStatus = pairingStatus,
                 )
                 DeviceRole.CONSUMER -> ConsumerPairingContent(
-                    context = context,
-                    connectionManager = connectionManager,
-                    onPaired = onPaired,
+                    discoveredDevices = discoveredDevices,
+                    selectedDevice = selectedDevice,
+                    enteredCode = enteredCode,
+                    pairingStatus = pairingStatus,
+                    onCodeChanged = { enteredCode = it },
+                    onDeviceSelected = { device ->
+                        selectedDevice = device
+                    },
+                    onSubmitCode = {
+                        if (enteredCode.length == 6 && selectedDevice != null) {
+                            pairingStatus = PairingStatus.Pairing
+
+                            val bluetoothManager = context.getSystemService(
+                                Context.BLUETOOTH_SERVICE
+                            ) as BluetoothManager
+                            val adapter = bluetoothManager.adapter
+                            val bleDevice: BluetoothDevice = adapter.getRemoteDevice(
+                                selectedDevice!!.address
+                            )
+
+                            val client = BlePairingClient(
+                                context = context,
+                                sessionCrypto = sessionCrypto,
+                                pairingCode = enteredCode,
+                                deviceId = deviceId,
+                                onPairingComplete = { result: PairingResult ->
+                                    scope.launch(Dispatchers.Main) {
+                                        pairingStatus = PairingStatus.Success
+                                        pairingClient?.stop()
+                                        // Connect to provider's TCP server
+                                        connectionManager.startAsConsumer(
+                                            crypto = sessionCrypto,
+                                            host = result.wifiHost,
+                                            port = result.wifiPort,
+                                        )
+                                        onPaired()
+                                    }
+                                },
+                                onPairingFailed = { reason ->
+                                    scope.launch(Dispatchers.Main) {
+                                        errorMessage = reason
+                                        pairingStatus = PairingStatus.Error
+                                    }
+                                },
+                            )
+                            client.connect(bleDevice)
+                            pairingClient = client
+                        }
+                    },
                 )
             }
-        }
 
-        // Bottom hint
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center,
-        ) {
-            Icon(
-                imageVector = Icons.Outlined.Info,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp),
-                tint = MaterialTheme.colorScheme.outline,
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = "Both devices must be on the same WiFi network.\nNo Bluetooth pre-pairing is needed.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline,
-                textAlign = TextAlign.Center,
-            )
+            Spacer(Modifier.weight(1f))
+
+            // Hint at bottom
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                ),
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Icon(
+                        Icons.Outlined.Info,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Both devices must be on the same WiFi network. " +
+                                "No Bluetooth pre-pairing is needed \u2014 " +
+                                "Telesor uses BLE only for discovery.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         }
     }
 }
 
-@SuppressLint("MissingPermission")
+/** Internal pairing progress state. */
+private sealed class PairingStatus {
+    data object Idle : PairingStatus()
+    data object Scanning : PairingStatus()
+    data object WaitingForPeer : PairingStatus()
+    data object Pairing : PairingStatus()
+    data object Success : PairingStatus()
+    data object Error : PairingStatus()
+}
+
 @Composable
 private fun ProviderPairingContent(
-    context: Context,
-    connectionManager: ConnectionManager,
-    onPaired: () -> Unit,
+    pairingCode: String,
+    pairingStatus: PairingStatus,
 ) {
-    val sessionCrypto = remember { SessionCrypto() }
-    val pairingCode = remember { SessionCrypto.generatePairingCode() }
-    var statusText by remember { mutableStateOf("Initializing...") }
-    var errorText by remember { mutableStateOf<String?>(null) }
-    var isPaired by remember { mutableStateOf(false) }
-
-    val discoveryManager = remember { BleDiscoveryManager(context) }
-    var pairingServer by remember { mutableStateOf<BlePairingServer?>(null) }
-
-    // Get device ID and start BLE advertising + GATT server
-    LaunchedEffect(Unit) {
-        val deviceId = TelesorApp.instance.preferences.getDeviceId()
-        val wifiIp = NetworkUtils.getLocalWifiIpAddress(context)
-
-        if (wifiIp == null) {
-            errorText = "No WiFi connection detected. Please connect to WiFi."
-            statusText = "Error"
-            return@LaunchedEffect
-        }
-
-        statusText = "Starting BLE advertising..."
-
-        // Start advertising so consumer can find us
-        discoveryManager.startAdvertising(DeviceRole.PROVIDER, deviceId)
-
-        // Create and start GATT server
-        // Port 0 = auto-assign; the actual port is returned by TelesorChannel.listen()
-        // We pass port 0 here and the server will tell the consumer the real port
-        // after the TCP server binds.
-        // BUT: BlePairingServer needs the port upfront for CHAR_WIFI_INFO.
-        // So we need to pre-bind a ServerSocket to get the port.
-        val tempPort = try {
-            val ss = java.net.ServerSocket(0)
-            val p = ss.localPort
-            ss.close()
-            p
-        } catch (e: Exception) {
-            errorText = "Failed to allocate TCP port: ${e.message}"
-            return@LaunchedEffect
-        }
-
-        val server = BlePairingServer(
-            context = context,
-            sessionCrypto = sessionCrypto,
-            expectedPairingCode = pairingCode,
-            deviceId = deviceId,
-            wifiHost = wifiIp,
-            wifiPort = tempPort,
-            onPairingComplete = { result ->
-                isPaired = true
-                statusText = "Paired! Connecting via WiFi..."
-                connectionManager.startAsProvider(
-                    crypto = sessionCrypto,
-                    port = result.wifiPort,
-                )
-                onPaired()
-            },
-            onPairingFailed = { reason ->
-                errorText = "Pairing failed: $reason"
-                statusText = "Failed"
-            },
-        )
-        pairingServer = server
-        server.start()
-        statusText = "Waiting for connection..."
-    }
-
-    // Cleanup
-    DisposableEffect(Unit) {
-        onDispose {
-            discoveryManager.stopAdvertising()
-            pairingServer?.stop()
-        }
-    }
-
     Spacer(Modifier.height(32.dp))
 
     Icon(
@@ -247,93 +370,103 @@ private fun ProviderPairingContent(
 
     Spacer(Modifier.height(32.dp))
 
-    if (errorText != null) {
-        Text(
-            text = errorText!!,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.error,
-            textAlign = TextAlign.Center,
-        )
-    } else if (!isPaired) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-            Spacer(Modifier.width(12.dp))
+    when (pairingStatus) {
+        is PairingStatus.WaitingForPeer -> {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = "Advertising via BLE\u2026 waiting for consumer",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        is PairingStatus.Success -> {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Outlined.CheckCircle,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = "Paired! Connecting via WiFi\u2026",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+        is PairingStatus.Error -> {
             Text(
-                text = statusText,
+                text = "Pairing failed. Go back and try again.",
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = MaterialTheme.colorScheme.error,
             )
         }
-    } else {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = Icons.Outlined.CheckCircle,
-                contentDescription = null,
-                modifier = Modifier.size(20.dp),
-                tint = MaterialTheme.colorScheme.primary,
-            )
-            Spacer(Modifier.width(12.dp))
-            Text(
-                text = statusText,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary,
-            )
+        else -> {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = "Initializing\u2026",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
 
-@SuppressLint("MissingPermission")
 @Composable
 private fun ConsumerPairingContent(
-    context: Context,
-    connectionManager: ConnectionManager,
-    onPaired: () -> Unit,
+    discoveredDevices: List<DiscoveredDevice>,
+    selectedDevice: DiscoveredDevice?,
+    enteredCode: String,
+    pairingStatus: PairingStatus,
+    onCodeChanged: (String) -> Unit,
+    onDeviceSelected: (DiscoveredDevice) -> Unit,
+    onSubmitCode: () -> Unit,
 ) {
-    val discoveryManager = remember { BleDiscoveryManager(context) }
-    val discoveredDevices = remember { mutableStateListOf<DiscoveredDevice>() }
-    var selectedDevice by remember { mutableStateOf<DiscoveredDevice?>(null) }
-    var pairingCodeInput by remember { mutableStateOf("") }
-    var statusText by remember { mutableStateOf("Scanning...") }
-    var errorText by remember { mutableStateOf<String?>(null) }
-    var isPairing by remember { mutableStateOf(false) }
-    var pairingClient by remember { mutableStateOf<BlePairingClient?>(null) }
-
-    val bluetoothManager = remember {
-        context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-    }
-    val bluetoothAdapter: BluetoothAdapter? = remember { bluetoothManager.adapter }
-
-    // Start BLE scan
-    LaunchedEffect(Unit) {
-        discoveryManager.scan().collect { device ->
-            // Only show providers, deduplicate by address
-            if (device.role == DeviceRole.PROVIDER) {
-                val existing = discoveredDevices.indexOfFirst { it.address == device.address }
-                if (existing >= 0) {
-                    discoveredDevices[existing] = device
-                } else {
-                    discoveredDevices.add(device)
-                }
-            }
-        }
+    if (pairingStatus is PairingStatus.Success) {
+        Spacer(Modifier.height(32.dp))
+        Icon(
+            Icons.Outlined.CheckCircle,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(64.dp),
+        )
+        Spacer(Modifier.height(16.dp))
+        Text(
+            text = "Paired! Connecting via WiFi\u2026",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        return
     }
 
-    // Cleanup
-    DisposableEffect(Unit) {
-        onDispose {
-            pairingClient?.stop()
-        }
+    if (pairingStatus is PairingStatus.Pairing) {
+        Spacer(Modifier.height(32.dp))
+        CircularProgressIndicator()
+        Spacer(Modifier.height(16.dp))
+        Text(
+            text = "Pairing via BLE\u2026",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        return
     }
 
+    // Step 1: select a provider device
     if (selectedDevice == null) {
-        // Phase 1: Show discovered devices
         Spacer(Modifier.height(16.dp))
 
         Row(verticalAlignment = Alignment.CenterVertically) {
             CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
             Spacer(Modifier.width(12.dp))
             Text(
-                text = "Scanning for nearby Telesor providers...",
+                text = "Scanning for nearby Telesor providers\u2026",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -343,48 +476,60 @@ private fun ConsumerPairingContent(
 
         if (discoveredDevices.isEmpty()) {
             Text(
-                text = "Make sure the provider device is nearby\nwith Bluetooth enabled",
+                text = "No devices found yet. Make sure the provider\u2019s screen is open.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.outline,
                 textAlign = TextAlign.Center,
             )
         } else {
-            Text(
-                text = "Tap a device to connect:",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-
-            Spacer(Modifier.height(12.dp))
-
             LazyColumn(
+                modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(discoveredDevices.toList(), key = { it.address }) { device ->
-                    DiscoveredDeviceCard(
-                        device = device,
-                        onClick = { selectedDevice = device },
-                    )
+                items(discoveredDevices, key = { it.address }) { device ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onDeviceSelected(device) },
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        ),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                Icons.Outlined.Devices,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                            Spacer(Modifier.width(16.dp))
+                            Column {
+                                Text(
+                                    text = device.name ?: "Telesor Provider",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                                Text(
+                                    text = "ID: ${device.deviceId} \u00b7 RSSI: ${device.rssi} dBm",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
     } else {
-        // Phase 2: Enter pairing code for selected device
-        Spacer(Modifier.height(32.dp))
-
-        Icon(
-            imageVector = Icons.Outlined.BluetoothSearching,
-            contentDescription = null,
-            modifier = Modifier.size(48.dp),
-            tint = MaterialTheme.colorScheme.primary,
-        )
-
+        // Step 2: enter pairing code
         Spacer(Modifier.height(16.dp))
 
         Text(
-            text = "Connecting to ${selectedDevice!!.name ?: selectedDevice!!.deviceId}",
+            text = "Selected: ${selectedDevice.name ?: "Telesor Provider"}",
             style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurface,
+            fontWeight = FontWeight.Medium,
         )
 
         Spacer(Modifier.height(24.dp))
@@ -398,197 +543,39 @@ private fun ConsumerPairingContent(
         Spacer(Modifier.height(16.dp))
 
         OutlinedTextField(
-            value = pairingCodeInput,
+            value = enteredCode,
             onValueChange = { value ->
-                if (value.length <= 6 && value.all { it.isDigit() }) {
-                    pairingCodeInput = value
+                // Only allow digits, max 6
+                val filtered = value.filter { it.isDigit() }.take(6)
+                onCodeChanged(filtered)
+                if (filtered.length == 6) {
+                    onSubmitCode()
                 }
             },
             label = { Text("Pairing Code") },
-            placeholder = { Text("000000") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            keyboardActions = KeyboardActions(
-                onDone = {
-                    if (pairingCodeInput.length == 6 && !isPairing) {
-                        initiateConsumerPairing(
-                            context = context,
-                            bluetoothAdapter = bluetoothAdapter,
-                            selectedDevice = selectedDevice!!,
-                            pairingCode = pairingCodeInput,
-                            connectionManager = connectionManager,
-                            onStatusUpdate = { statusText = it },
-                            onError = { errorText = it; isPairing = false },
-                            onPairingStarted = { client -> pairingClient = client; isPairing = true },
-                            onPaired = onPaired,
-                        )
-                    }
-                },
-            ),
+            placeholder = { Text("000 000") },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Number,
+                imeAction = ImeAction.Done,
+            ),
+            keyboardActions = KeyboardActions(
+                onDone = { onSubmitCode() },
+            ),
             textStyle = MaterialTheme.typography.headlineMedium.copy(
                 fontFamily = FontFamily.Monospace,
                 letterSpacing = 4.sp,
                 textAlign = TextAlign.Center,
             ),
-            modifier = Modifier.fillMaxWidth(0.6f),
-            enabled = !isPairing,
+            modifier = Modifier.fillMaxWidth(),
         )
 
-        Spacer(Modifier.height(16.dp))
-
-        TextButton(
-            onClick = {
-                if (pairingCodeInput.length == 6 && !isPairing) {
-                    initiateConsumerPairing(
-                        context = context,
-                        bluetoothAdapter = bluetoothAdapter,
-                        selectedDevice = selectedDevice!!,
-                        pairingCode = pairingCodeInput,
-                        connectionManager = connectionManager,
-                        onStatusUpdate = { statusText = it },
-                        onError = { errorText = it; isPairing = false },
-                        onPairingStarted = { client -> pairingClient = client; isPairing = true },
-                        onPaired = onPaired,
-                    )
-                }
-            },
-            enabled = pairingCodeInput.length == 6 && !isPairing,
-        ) {
-            Text("Connect")
-        }
-
-        Spacer(Modifier.height(16.dp))
-
-        if (errorText != null) {
+        if (pairingStatus is PairingStatus.Error) {
+            Spacer(Modifier.height(12.dp))
             Text(
-                text = errorText!!,
-                style = MaterialTheme.typography.bodyMedium,
+                text = "Pairing failed. Check the code and try again.",
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
-                textAlign = TextAlign.Center,
-            )
-            Spacer(Modifier.height(8.dp))
-            TextButton(onClick = {
-                errorText = null
-                pairingCodeInput = ""
-                selectedDevice = null
-                pairingClient?.stop()
-                pairingClient = null
-            }) {
-                Text("Try again")
-            }
-        } else if (isPairing) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                Spacer(Modifier.width(12.dp))
-                Text(
-                    text = statusText,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-
-        Spacer(Modifier.height(8.dp))
-
-        if (!isPairing && errorText == null) {
-            TextButton(onClick = {
-                selectedDevice = null
-                pairingCodeInput = ""
-            }) {
-                Text("Choose a different device")
-            }
-        }
-    }
-}
-
-@SuppressLint("MissingPermission")
-private fun initiateConsumerPairing(
-    context: Context,
-    bluetoothAdapter: BluetoothAdapter?,
-    selectedDevice: DiscoveredDevice,
-    pairingCode: String,
-    connectionManager: ConnectionManager,
-    onStatusUpdate: (String) -> Unit,
-    onError: (String) -> Unit,
-    onPairingStarted: (BlePairingClient) -> Unit,
-    onPaired: () -> Unit,
-) {
-    if (bluetoothAdapter == null) {
-        onError("Bluetooth not available")
-        return
-    }
-
-    onStatusUpdate("Connecting via BLE...")
-
-    val sessionCrypto = SessionCrypto()
-    val deviceId = android.os.Build.MODEL // Fallback; ideally use preferences but this is sync
-
-    val client = BlePairingClient(
-        context = context,
-        sessionCrypto = sessionCrypto,
-        pairingCode = pairingCode,
-        deviceId = deviceId,
-        onPairingComplete = { result: PairingResult ->
-            onStatusUpdate("Paired! Connecting via WiFi...")
-            connectionManager.startAsConsumer(
-                crypto = sessionCrypto,
-                host = result.wifiHost,
-                port = result.wifiPort,
-            )
-            onPaired()
-        },
-        onPairingFailed = { reason ->
-            onError("Pairing failed: $reason")
-        },
-    )
-    onPairingStarted(client)
-
-    val bleDevice = bluetoothAdapter.getRemoteDevice(selectedDevice.address)
-    client.connect(bleDevice)
-}
-
-@Composable
-private fun DiscoveredDeviceCard(
-    device: DiscoveredDevice,
-    onClick: () -> Unit,
-) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant,
-        ),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                imageVector = Icons.Outlined.Devices,
-                contentDescription = null,
-                modifier = Modifier.size(32.dp),
-                tint = MaterialTheme.colorScheme.primary,
-            )
-            Spacer(Modifier.width(16.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = device.name ?: "Telesor Device",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = "ID: ${device.deviceId}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Text(
-                text = "${device.rssi} dBm",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.outline,
             )
         }
     }
