@@ -121,12 +121,18 @@ fun PairingScreen(
 
     LaunchedEffect(connState, blePairingDone) {
         if (blePairingDone && connState == ConnectionState.CONNECTED) {
+            // TCP is up — safe to tear down the GATT server now
+            pairingServer?.stop()
+            pairingServer = null
             onPaired()
         }
         if (blePairingDone && connState == ConnectionState.ERROR) {
             errorMessage = "WiFi connection failed. Make sure both devices are on the same network."
             pairingStatus = PairingStatus.Error
             blePairingDone = false
+            // Clean up GATT server on error too
+            pairingServer?.stop()
+            pairingServer = null
         }
     }
 
@@ -164,7 +170,11 @@ fun PairingScreen(
                     scope.launch(Dispatchers.Main) {
                         pairingStatus = PairingStatus.Success
                         discoveryManager.stopAdvertising()
-                        pairingServer?.stop()
+                        // DO NOT stop the GATT server here! The consumer still
+                        // needs to read CHAR_WIFI_INFO after the pairing write.
+                        // The server will be cleaned up in DisposableEffect or
+                        // after TCP connection is established.
+
                         // Start TCP server as provider — navigation happens
                         // when connectionState reaches CONNECTED
                         connectionManager.startAsProvider(
