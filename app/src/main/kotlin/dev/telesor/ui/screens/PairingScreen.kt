@@ -41,6 +41,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -63,6 +64,7 @@ import dev.telesor.ble.BlePairingServer
 import dev.telesor.ble.DiscoveredDevice
 import dev.telesor.ble.PairingResult
 import dev.telesor.crypto.SessionCrypto
+import dev.telesor.data.ConnectionState
 import dev.telesor.data.DeviceRole
 import dev.telesor.net.ConnectionManager
 import dev.telesor.net.NetworkUtils
@@ -111,6 +113,18 @@ fun PairingScreen(
         deviceId = dev.telesor.TelesorApp.instance.preferences.getDeviceId()
     }
 
+    // Navigate to ConnectionScreen only when TCP connection is actually established.
+    // This prevents the race condition where onPaired() fires before the TCP
+    // server/client has finished connecting.
+    val connState by connectionManager.connectionState.collectAsState()
+    var blePairingDone by remember { mutableStateOf(false) }
+
+    LaunchedEffect(connState, blePairingDone) {
+        if (blePairingDone && connState == ConnectionState.CONNECTED) {
+            onPaired()
+        }
+    }
+
     // Cleanup on dispose
     DisposableEffect(Unit) {
         onDispose {
@@ -146,12 +160,13 @@ fun PairingScreen(
                         pairingStatus = PairingStatus.Success
                         discoveryManager.stopAdvertising()
                         pairingServer?.stop()
-                        // Start TCP server as provider
+                        // Start TCP server as provider — navigation happens
+                        // when connectionState reaches CONNECTED
                         connectionManager.startAsProvider(
                             crypto = sessionCrypto,
                             port = PROVIDER_TCP_PORT,
                         )
-                        onPaired()
+                        blePairingDone = true
                     }
                 },
                 onPairingFailed = { reason ->
@@ -267,13 +282,14 @@ fun PairingScreen(
                                     scope.launch(Dispatchers.Main) {
                                         pairingStatus = PairingStatus.Success
                                         pairingClient?.stop()
-                                        // Connect to provider's TCP server
+                                        // Connect to provider's TCP server — navigation
+                                        // happens when connectionState reaches CONNECTED
                                         connectionManager.startAsConsumer(
                                             crypto = sessionCrypto,
                                             host = result.wifiHost,
                                             port = result.wifiPort,
                                         )
-                                        onPaired()
+                                        blePairingDone = true
                                     }
                                 },
                                 onPairingFailed = { reason ->
@@ -384,15 +400,10 @@ private fun ProviderPairingContent(
         }
         is PairingStatus.Success -> {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Outlined.CheckCircle,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(20.dp),
-                )
+                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                 Spacer(Modifier.width(12.dp))
                 Text(
-                    text = "Paired! Connecting via WiFi\u2026",
+                    text = "Paired! Waiting for WiFi connection\u2026",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.primary,
                 )
@@ -431,12 +442,7 @@ private fun ConsumerPairingContent(
 ) {
     if (pairingStatus is PairingStatus.Success) {
         Spacer(Modifier.height(32.dp))
-        Icon(
-            Icons.Outlined.CheckCircle,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(64.dp),
-        )
+        CircularProgressIndicator()
         Spacer(Modifier.height(16.dp))
         Text(
             text = "Paired! Connecting via WiFi\u2026",

@@ -134,17 +134,33 @@ class ConnectionManager(
         scope = connectionScope
 
         connectionScope.launch {
-            try {
-                _connectionState.value = ConnectionState.UPGRADING_TO_WIFI
-                val ch = TelesorChannel(crypto)
-                ch.connect(host, port)
-                _channel = ch
-                onChannelEstablished(ch)
-            } catch (e: Exception) {
-                Log.e(TAG, "Consumer connect failed", e)
-                _connectionState.value = ConnectionState.ERROR
-                scheduleReconnect()
+            _connectionState.value = ConnectionState.UPGRADING_TO_WIFI
+
+            // The provider's TCP server may not be listening yet (race between
+            // BLE pairing completion and TCP bind). Retry a few times with
+            // increasing delays to give the provider time to start.
+            var lastError: Exception? = null
+            for (attempt in 0 until INITIAL_CONNECT_RETRIES) {
+                try {
+                    if (attempt > 0) {
+                        val backoff = INITIAL_CONNECT_DELAY_MS * (1L shl (attempt - 1).coerceAtMost(3))
+                        Log.i(TAG, "Consumer connect attempt ${attempt + 1}, waiting ${backoff}ms")
+                        delay(backoff)
+                    }
+                    val ch = TelesorChannel(crypto)
+                    ch.connect(host, port)
+                    _channel = ch
+                    onChannelEstablished(ch)
+                    return@launch
+                } catch (e: Exception) {
+                    lastError = e
+                    Log.w(TAG, "Consumer connect attempt ${attempt + 1} failed: ${e.message}")
+                }
             }
+
+            Log.e(TAG, "Consumer connect failed after $INITIAL_CONNECT_RETRIES attempts", lastError)
+            _connectionState.value = ConnectionState.ERROR
+            scheduleReconnect()
         }
     }
 
@@ -352,5 +368,11 @@ class ConnectionManager(
     companion object {
         /** Keepalive ping interval. */
         private const val KEEPALIVE_INTERVAL_MS = 10_000L
+
+        /** Number of TCP connect retries before falling back to reconnect logic. */
+        private const val INITIAL_CONNECT_RETRIES = 6
+
+        /** Base delay between initial connect retries (doubles each attempt). */
+        private const val INITIAL_CONNECT_DELAY_MS = 500L
     }
 }
