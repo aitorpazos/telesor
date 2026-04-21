@@ -6,9 +6,7 @@ import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattService
-import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
-import android.content.Context
 import android.os.Build
 import android.util.Log
 import dev.telesor.crypto.SessionCrypto
@@ -16,21 +14,28 @@ import dev.telesor.crypto.SessionCrypto
 private const val TAG = "BlePairingClient"
 
 /**
+ * Maximum ATT MTU we request. Android caps at 517.
+ * The usable payload per GATT write/read = MTU − 3.
+ */
+private const val REQUESTED_MTU = 512
+
+/**
  * GATT client used by the **consumer** to complete the pairing handshake
  * with a provider's [BlePairingServer].
  *
  * Flow:
  * 1. Connect to the provider's GATT server
- * 2. Discover services
- * 3. Read provider's identity (device ID)
- * 4. Read provider's ECDH public key
- * 5. Write our pairing code + public key + device ID to the pairing characteristic
- * 6. Read WiFi connection info (IP:port) from provider
- * 7. Derive shared session key from ECDH + pairing code
- * 8. Report success with [PairingResult]
+ * 2. Request a large MTU (the pairing payload is ~164 bytes)
+ * 3. Discover services
+ * 4. Read provider's identity (device ID)
+ * 5. Read provider's ECDH public key
+ * 6. Write our pairing code + public key + device ID to the pairing characteristic
+ * 7. Read WiFi connection info (IP:port) from provider
+ * 8. Derive shared session key from ECDH + pairing code
+ * 9. Report success with [PairingResult]
  */
 class BlePairingClient(
-    private val context: Context,
+    private val context: android.content.Context,
     private val sessionCrypto: SessionCrypto,
     private val pairingCode: String,
     private val deviceId: String,
@@ -59,17 +64,28 @@ class BlePairingClient(
         private var remotePubKey: String? = null
         private var wifiInfo: String? = null
         private var service: BluetoothGattService? = null
+        private var negotiatedMtu: Int = 23 // BLE default
+
+        // ---- Buffers for long reads (offset-based reassembly) ----
+        private var readBuffer = StringBuilder()
+        private var currentReadUuid: java.util.UUID? = null
 
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                Log.i(TAG, "Connected, discovering services")
-                g.discoverServices()
+                Log.i(TAG, "Connected, requesting MTU $REQUESTED_MTU")
+                g.requestMtu(REQUESTED_MTU)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 Log.w(TAG, "Disconnected (status=$status)")
                 if (remotePubKey == null) {
                     onPairingFailed("Connection lost during pairing")
                 }
             }
+        }
+
+        override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+            negotiatedMtu = if (status == BluetoothGatt.GATT_SUCCESS) mtu else 23
+            Log.i(TAG, "MTU negotiated: $negotiatedMtu (status=$status)")
+            g.discoverServices()
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
@@ -85,10 +101,24 @@ class BlePairingClient(
             }
 
             Log.i(TAG, "Services discovered, reading identity")
-            val identityChar = service!!.getCharacteristic(BleConstants.CHAR_IDENTITY_UUID)
-            g.readCharacteristic(identityChar)
+            startLongRead(g, BleConstants.CHAR_IDENTITY_UUID)
         }
 
+        // ---------- Long read helpers ----------
+
+        /**
+         * Begin reading a characteristic. Clears the buffer and issues the
+         * first readCharacteristic call; subsequent offset reads happen in
+         * [handleCharRead] when the returned chunk fills the (MTU−1) window.
+         */
+        private fun startLongRead(g: BluetoothGatt, uuid: java.util.UUID) {
+            readBuffer.clear()
+            currentReadUuid = uuid
+            val ch = service!!.getCharacteristic(uuid)
+            g.readCharacteristic(ch)
+        }
+
+        // API < 33 callback
         @Deprecated("Deprecated in API 33")
         override fun onCharacteristicRead(
             g: BluetoothGatt,
@@ -100,6 +130,7 @@ class BlePairingClient(
             }
         }
 
+        // API 33+ callback
         override fun onCharacteristicRead(
             g: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
@@ -120,44 +151,64 @@ class BlePairingClient(
                 return
             }
 
-            val text = String(value, Charsets.UTF_8)
+            val chunk = String(value, Charsets.UTF_8)
+            readBuffer.append(chunk)
+
+            // BLE long-read: if the chunk exactly fills the ATT payload
+            // (MTU − 1), there may be more data. Android's stack issues
+            // automatic "Read Blob" requests for us, so each callback
+            // delivers the next offset chunk. A short chunk means we're done.
+            val attPayload = negotiatedMtu - 1
+            if (value.size >= attPayload) {
+                // More data expected — Android will trigger the next read
+                // automatically (Read Blob Request). Nothing to do here.
+                return
+            }
+
+            // Full value assembled
+            val fullValue = readBuffer.toString()
+            readBuffer.clear()
 
             when (uuid) {
                 BleConstants.CHAR_IDENTITY_UUID -> {
-                    remoteDeviceId = text
-                    Log.i(TAG, "Got remote device ID: $text, reading pubkey")
-                    val pubkeyChar = service!!.getCharacteristic(BleConstants.CHAR_PUBKEY_UUID)
-                    g.readCharacteristic(pubkeyChar)
+                    remoteDeviceId = fullValue
+                    Log.i(TAG, "Got remote device ID: $fullValue, reading pubkey")
+                    startLongRead(g, BleConstants.CHAR_PUBKEY_UUID)
                 }
 
                 BleConstants.CHAR_PUBKEY_UUID -> {
-                    remotePubKey = text
-                    Log.i(TAG, "Got remote pubkey, writing pairing data")
+                    remotePubKey = fullValue
+                    Log.i(TAG, "Got remote pubkey (${fullValue.length} chars), writing pairing data")
                     writePairingData(g)
                 }
 
                 BleConstants.CHAR_WIFI_INFO_UUID -> {
-                    wifiInfo = text
-                    Log.i(TAG, "Got WiFi info: $text")
+                    wifiInfo = fullValue
+                    Log.i(TAG, "Got WiFi info: $fullValue")
                     completePairing()
                 }
             }
         }
 
+        // ---------- Write ----------
+
         @SuppressLint("MissingPermission")
         private fun writePairingData(g: BluetoothGatt) {
             val payload = "$pairingCode|${sessionCrypto.publicKeyBase64}|$deviceId"
+            val payloadBytes = payload.toByteArray(Charsets.UTF_8)
+            Log.i(TAG, "Pairing payload size: ${payloadBytes.size} bytes, MTU: $negotiatedMtu")
+
             val pairingChar = service!!.getCharacteristic(BleConstants.CHAR_PAIRING_UUID)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 g.writeCharacteristic(
                     pairingChar,
-                    payload.toByteArray(Charsets.UTF_8),
+                    payloadBytes,
                     BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
                 )
             } else {
                 @Suppress("DEPRECATION")
-                pairingChar.value = payload.toByteArray(Charsets.UTF_8)
+                pairingChar.value = payloadBytes
                 @Suppress("DEPRECATION")
                 g.writeCharacteristic(pairingChar)
             }
@@ -174,10 +225,11 @@ class BlePairingClient(
                     return
                 }
                 Log.i(TAG, "Pairing write accepted, reading WiFi info")
-                val wifiChar = service!!.getCharacteristic(BleConstants.CHAR_WIFI_INFO_UUID)
-                g.readCharacteristic(wifiChar)
+                startLongRead(g, BleConstants.CHAR_WIFI_INFO_UUID)
             }
         }
+
+        // ---------- Complete ----------
 
         private fun completePairing() {
             val rpk = remotePubKey
