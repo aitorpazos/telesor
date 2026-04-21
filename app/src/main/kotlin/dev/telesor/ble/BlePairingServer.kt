@@ -34,13 +34,10 @@ data class PairingResult(
  * 4. Provider writes WiFi connection info to CHAR_WIFI_INFO
  * 5. Both sides derive session key from ECDH + pairing code
  *
- * Long-read support: read requests with offset > 0 return subsequent chunks
- * of the full value, allowing the BLE stack to reassemble values larger than
- * (MTU − 1) bytes via Read Blob requests.
- *
- * Long-write support: if the consumer's write payload exceeds (MTU − 3),
- * Android may deliver it as a Prepared Write sequence. We accumulate chunks
- * in [preparedWrites] and process the full payload in [onExecuteWrite].
+ * NOTE: The pairing payload (~140 bytes) exceeds the default BLE ATT MTU (20 bytes).
+ * Even after MTU negotiation, Android may use "prepared writes" (preparedWrite=true)
+ * which deliver data in chunks. This server buffers those chunks and processes
+ * the full payload in onExecuteWrite().
  */
 class BlePairingServer(
     private val context: Context,
@@ -56,11 +53,6 @@ class BlePairingServer(
         context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
 
     private var gattServer: BluetoothGattServer? = null
-
-    // Pre-computed full byte arrays for readable characteristics
-    private val identityBytes by lazy { deviceId.toByteArray(Charsets.UTF_8) }
-    private val pubKeyBytes by lazy { sessionCrypto.publicKeyBase64.toByteArray(Charsets.UTF_8) }
-    private val wifiInfoBytes by lazy { "$wifiHost:$wifiPort".toByteArray(Charsets.UTF_8) }
 
     @SuppressLint("MissingPermission")
     fun start() {
@@ -83,6 +75,7 @@ class BlePairingServer(
                 )
             )
             // Pairing: writable, consumer sends code + pubkey
+            // Support both regular write and long/prepared writes
             addCharacteristic(
                 BluetoothGattCharacteristic(
                     BleConstants.CHAR_PAIRING_UUID,
@@ -109,8 +102,7 @@ class BlePairingServer(
         }
 
         server.addService(service)
-        Log.i(TAG, "GATT pairing server started (identity=${identityBytes.size}B, " +
-                "pubkey=${pubKeyBytes.size}B, wifi=${wifiInfoBytes.size}B)")
+        Log.i(TAG, "GATT pairing server started")
     }
 
     @SuppressLint("MissingPermission")
@@ -122,11 +114,16 @@ class BlePairingServer(
     @SuppressLint("MissingPermission")
     private val gattCallback = object : BluetoothGattServerCallback() {
 
-        /** Buffer for prepared (long) writes per device. */
-        private val preparedWrites = mutableMapOf<String, ByteArray>()
+        /**
+         * Buffer for prepared (long) writes. BLE long writes arrive as multiple
+         * onCharacteristicWriteRequest calls with preparedWrite=true, each carrying
+         * a chunk at a given offset. We assemble the full payload here and process
+         * it when onExecuteWrite is called.
+         */
+        private val preparedWriteBuffer = mutableMapOf<String, ByteArray>()
 
         override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
-            Log.i(TAG, "MTU changed to $mtu for ${device.address}")
+            Log.i(TAG, "Server MTU changed to $mtu for ${device.address}")
         }
 
         override fun onCharacteristicReadRequest(
@@ -135,23 +132,19 @@ class BlePairingServer(
             offset: Int,
             characteristic: BluetoothGattCharacteristic,
         ) {
-            val fullValue = when (characteristic.uuid) {
-                BleConstants.CHAR_IDENTITY_UUID -> identityBytes
-                BleConstants.CHAR_PUBKEY_UUID -> pubKeyBytes
-                BleConstants.CHAR_WIFI_INFO_UUID -> wifiInfoBytes
+            val response = when (characteristic.uuid) {
+                BleConstants.CHAR_IDENTITY_UUID -> deviceId.toByteArray(Charsets.UTF_8)
+                BleConstants.CHAR_PUBKEY_UUID -> sessionCrypto.publicKeyBase64.toByteArray(Charsets.UTF_8)
+                BleConstants.CHAR_WIFI_INFO_UUID -> "$wifiHost:$wifiPort".toByteArray(Charsets.UTF_8)
                 else -> null
             }
 
-            if (fullValue != null) {
-                // Return the chunk starting at `offset`.
-                // The BLE stack sends Read Blob requests with increasing
-                // offsets until we return a chunk shorter than (MTU − 1).
-                val chunk = if (offset < fullValue.size) {
-                    fullValue.copyOfRange(offset, fullValue.size)
+            if (response != null) {
+                val chunk = if (offset < response.size) {
+                    response.copyOfRange(offset, response.size)
                 } else {
-                    byteArrayOf() // offset past end → empty → signals "done"
+                    byteArrayOf()
                 }
-                Log.d(TAG, "Read ${characteristic.uuid} offset=$offset chunk=${chunk.size}B total=${fullValue.size}B")
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, chunk)
             } else {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
@@ -167,41 +160,41 @@ class BlePairingServer(
             offset: Int,
             value: ByteArray?,
         ) {
-            if (characteristic.uuid != BleConstants.CHAR_PAIRING_UUID) {
+            if (characteristic.uuid != BleConstants.CHAR_PAIRING_UUID || value == null) {
                 if (responseNeeded) {
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
                 }
                 return
             }
 
-            val data = value ?: byteArrayOf()
-
             if (preparedWrite) {
-                // Long write: accumulate chunks. We'll process in onExecuteWrite.
+                // Long write — buffer the chunk at the given offset.
+                // We'll process the full payload in onExecuteWrite().
                 val key = device.address
-                val existing = preparedWrites[key] ?: byteArrayOf()
-                // Ensure the buffer is large enough for the offset
-                val newBuf = if (offset + data.size > existing.size) {
-                    existing.copyOf(offset + data.size)
+                val existing = preparedWriteBuffer[key] ?: byteArrayOf()
+
+                // Extend the buffer to fit offset + value
+                val needed = offset + value.size
+                val buffer = if (existing.size < needed) {
+                    existing.copyOf(needed)
                 } else {
-                    existing.copyOf()
+                    existing
                 }
-                System.arraycopy(data, 0, newBuf, offset, data.size)
-                preparedWrites[key] = newBuf
-                Log.d(TAG, "Prepared write chunk: offset=$offset size=${data.size}")
+                System.arraycopy(value, 0, buffer, offset, value.size)
+                preparedWriteBuffer[key] = buffer
+
+                Log.d(TAG, "Prepared write chunk: offset=$offset, size=${value.size}, total=${buffer.size}")
+
                 if (responseNeeded) {
-                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, data)
+                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
                 }
             } else {
-                // Regular (short) write — process immediately
+                // Regular (non-prepared) write — payload fits in a single ATT write.
+                Log.i(TAG, "Direct write: ${value.size} bytes")
                 if (responseNeeded) {
-                    // Send response before processing so the client isn't blocked
-                    val result = processPairingPayload(data)
-                    val status = if (result) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
-                    gattServer?.sendResponse(device, requestId, status, 0, null)
-                } else {
-                    processPairingPayload(data)
+                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
                 }
+                handlePairingPayload(device, value)
             }
         }
 
@@ -211,36 +204,33 @@ class BlePairingServer(
             execute: Boolean,
         ) {
             val key = device.address
-            val payload = preparedWrites.remove(key)
+            val buffer = preparedWriteBuffer.remove(key)
 
-            if (!execute || payload == null) {
-                // Client cancelled the prepared write
+            if (execute && buffer != null) {
+                Log.i(TAG, "Execute write: ${buffer.size} bytes assembled")
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
-                return
+                handlePairingPayload(device, buffer)
+            } else {
+                // Cancelled or no data
+                Log.w(TAG, "Execute write cancelled or empty")
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
             }
-
-            Log.i(TAG, "Execute write: ${payload.size} bytes from ${device.address}")
-            val result = processPairingPayload(payload)
-            val status = if (result) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
-            gattServer?.sendResponse(device, requestId, status, 0, null)
         }
 
-        /**
-         * Parse and validate the pairing payload.
-         * Expected format: "CODE|BASE64_PUBKEY|DEVICE_ID"
-         * @return true if pairing succeeded
-         */
-        private fun processPairingPayload(value: ByteArray): Boolean {
+        private fun handlePairingPayload(
+            device: BluetoothDevice,
+            value: ByteArray,
+        ) {
+            // Expected format: "CODE|BASE64_PUBKEY|DEVICE_ID"
             val payload = String(value, Charsets.UTF_8)
             val parts = payload.split("|", limit = 3)
 
-            Log.i(TAG, "Pairing payload: ${payload.length} chars, ${parts.size} parts")
+            Log.i(TAG, "Pairing payload: ${payload.length} chars, parts=${parts.size}")
 
             if (parts.size < 3) {
-                Log.w(TAG, "Malformed pairing payload (${parts.size} parts, expected 3). " +
-                        "Payload length=${payload.length}, first 40 chars: ${payload.take(40)}")
+                Log.w(TAG, "Malformed pairing payload: got ${parts.size} parts from ${payload.length} chars")
                 onPairingFailed("Malformed pairing data")
-                return false
+                return
             }
 
             val (code, remotePubKey, remoteDeviceId) = parts
@@ -248,7 +238,7 @@ class BlePairingServer(
             if (code != expectedPairingCode) {
                 Log.w(TAG, "Wrong pairing code")
                 onPairingFailed("Wrong pairing code")
-                return false
+                return
             }
 
             // Derive session key
@@ -257,7 +247,7 @@ class BlePairingServer(
             } catch (e: Exception) {
                 Log.e(TAG, "Key derivation failed", e)
                 onPairingFailed("Key derivation failed: ${e.message}")
-                return false
+                return
             }
 
             Log.i(TAG, "Pairing successful with $remoteDeviceId")
@@ -269,7 +259,6 @@ class BlePairingServer(
                     wifiPort = wifiPort,
                 )
             )
-            return true
         }
     }
 }
