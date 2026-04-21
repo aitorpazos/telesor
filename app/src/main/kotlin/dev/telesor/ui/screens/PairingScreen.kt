@@ -123,6 +123,11 @@ fun PairingScreen(
         if (blePairingDone && connState == ConnectionState.CONNECTED) {
             onPaired()
         }
+        if (blePairingDone && connState == ConnectionState.ERROR) {
+            errorMessage = "WiFi connection failed. Make sure both devices are on the same network."
+            pairingStatus = PairingStatus.Error
+            blePairingDone = false
+        }
     }
 
     // Cleanup on dispose

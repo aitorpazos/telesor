@@ -73,6 +73,14 @@ class BlePairingClient(
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 Log.i(TAG, "Connected, requesting MTU $REQUESTED_MTU")
+                // Clear GATT cache to avoid stale service data from previous connections
+                try {
+                    val refresh = g.javaClass.getMethod("refresh")
+                    refresh.invoke(g)
+                    Log.i(TAG, "GATT cache cleared")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not clear GATT cache: ${e.message}")
+                }
                 g.requestMtu(REQUESTED_MTU)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 Log.w(TAG, "Disconnected (status=$status)")
@@ -147,7 +155,7 @@ class BlePairingClient(
             value: ByteArray?,
         ) {
             if (status != BluetoothGatt.GATT_SUCCESS || value == null) {
-                onPairingFailed("Read failed for $uuid (status=$status)")
+                onPairingFailed("Read failed (status=$status). Try again.")
                 return
             }
 
